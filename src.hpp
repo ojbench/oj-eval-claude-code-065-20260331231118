@@ -24,14 +24,22 @@ private:
         int* start;           // Start of the block
         int blockCount;       // Number of 4096-byte blocks
         int capacity;         // Total ints in this block
-        int used;             // Number of ints currently used
+        int used;             // Number of ints currently used (high water mark)
 
         Block(int* s, int bc, int cap) : start(s), blockCount(bc), capacity(cap), used(0) {}
     };
 
+    struct FreeRegion {
+        int* start;
+        int size;
+
+        FreeRegion(int* s, int sz) : start(s), size(sz) {}
+    };
+
     std::vector<Block> blocks;
-    int* lastAllocatedPtr;      // Track the last allocated pointer
-    int lastAllocatedSize;       // Track the size of last allocation
+    std::vector<FreeRegion> freeRegions;  // Track deallocated regions
+    int* lastAllocatedPtr;                 // Track the last allocated pointer
+    int lastAllocatedSize;                  // Track the size of last allocation
 
 public:
     Allocator() : lastAllocatedPtr(nullptr), lastAllocatedSize(0) {
@@ -50,44 +58,52 @@ public:
      * @return the pointer to the allocated memory space
      */
     int* allocate(int n) {
-        // Check if we can reuse the last allocated space if it was deallocated
+        // First, try to reuse the last allocated space if it was deallocated
         if (lastAllocatedPtr != nullptr) {
             // Find which block this belongs to
             for (auto& block : blocks) {
                 if (lastAllocatedPtr >= block.start &&
                     lastAllocatedPtr < block.start + block.capacity) {
-                    // Check if there's enough space
                     int offset = lastAllocatedPtr - block.start;
                     if (offset + n <= block.capacity) {
                         int* result = lastAllocatedPtr;
-                        // Update the block's used counter if needed
                         if (offset + n > block.used) {
                             block.used = offset + n;
                         }
-
-                        // Update last allocated
                         lastAllocatedPtr = result;
                         lastAllocatedSize = n;
-
                         return result;
                     }
                     break;
                 }
             }
-            // If we reach here, the reuse didn't work, continue to normal allocation
             lastAllocatedPtr = nullptr;
         }
 
-        // Try to find space in existing blocks
+        // Try to find space in free regions
+        for (size_t i = 0; i < freeRegions.size(); ++i) {
+            if (freeRegions[i].size >= n) {
+                int* result = freeRegions[i].start;
+                // Update or remove the free region
+                if (freeRegions[i].size == n) {
+                    freeRegions.erase(freeRegions.begin() + i);
+                } else {
+                    freeRegions[i].start += n;
+                    freeRegions[i].size -= n;
+                }
+                lastAllocatedPtr = result;
+                lastAllocatedSize = n;
+                return result;
+            }
+        }
+
+        // Try to find space in existing blocks (at the end of used space)
         for (auto& block : blocks) {
             if (block.capacity - block.used >= n) {
                 int* result = block.start + block.used;
                 block.used += n;
-
-                // Track as last allocated
                 lastAllocatedPtr = result;
                 lastAllocatedSize = n;
-
                 return result;
             }
         }
@@ -105,7 +121,6 @@ public:
         int* result = block.start;
         block.used = n;
 
-        // Track as last allocated
         lastAllocatedPtr = result;
         lastAllocatedSize = n;
 
@@ -118,29 +133,47 @@ public:
      * the behaviour is undefined.
      */
     void deallocate(int* pointer, int n) {
-        // Check if this is the last allocation
+        // Check if this is the last allocation - special handling for reuse
         if (pointer == lastAllocatedPtr && n == lastAllocatedSize) {
-            // Mark that this space is available for reuse
-            // Keep lastAllocatedPtr pointing to this location
-            // so it can be reused in the next allocate call
+            // Keep lastAllocatedPtr pointing here so it can be reused
             return;
         }
 
         // For other deallocations, check if it's at the end of a block
         for (auto& block : blocks) {
             if (pointer >= block.start && pointer < block.start + block.capacity) {
-                // Check if this deallocation is at the end of the used space
+                // Check if this is at the end of the used space
                 if (pointer + n == block.start + block.used) {
-                    // Reclaim this space
+                    // Reclaim this space by reducing used
                     block.used -= n;
 
-                    // Update last allocated pointer
+                    // Update lastAllocatedPtr to point to the new end
                     if (block.used > 0) {
                         lastAllocatedPtr = block.start + block.used;
-                        lastAllocatedSize = 0;
+                        lastAllocatedSize = 0;  // Unknown size
                     } else {
                         lastAllocatedPtr = nullptr;
                         lastAllocatedSize = 0;
+                    }
+                } else {
+                    // Not at the end - add to free regions
+                    freeRegions.push_back(FreeRegion(pointer, n));
+
+                    // Try to merge adjacent free regions
+                    for (size_t i = 0; i < freeRegions.size(); ++i) {
+                        for (size_t j = i + 1; j < freeRegions.size(); ++j) {
+                            // Check if regions are adjacent
+                            if (freeRegions[i].start + freeRegions[i].size == freeRegions[j].start) {
+                                freeRegions[i].size += freeRegions[j].size;
+                                freeRegions.erase(freeRegions.begin() + j);
+                                --j;
+                            } else if (freeRegions[j].start + freeRegions[j].size == freeRegions[i].start) {
+                                freeRegions[i].start = freeRegions[j].start;
+                                freeRegions[i].size += freeRegions[j].size;
+                                freeRegions.erase(freeRegions.begin() + j);
+                                --j;
+                            }
+                        }
                     }
                 }
                 break;
