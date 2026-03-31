@@ -140,38 +140,101 @@ public:
         }
 
         // For other deallocations, check if it's at the end of a block
-        for (auto& block : blocks) {
+        for (size_t blockIdx = 0; blockIdx < blocks.size(); ++blockIdx) {
+            Block& block = blocks[blockIdx];
             if (pointer >= block.start && pointer < block.start + block.capacity) {
                 // Check if this is at the end of the used space
                 if (pointer + n == block.start + block.used) {
                     // Reclaim this space by reducing used
                     block.used -= n;
 
-                    // Update lastAllocatedPtr to point to the new end
-                    if (block.used > 0) {
+                    // Check if block is now empty
+                    if (block.used == 0) {
+                        // Save block info before erasing
+                        int* blockStart = block.start;
+                        int blockCount = block.blockCount;
+                        int blockCapacity = block.capacity;
+
+                        // Free the block and remove it
+                        freeBlock(blockStart, blockCount);
+                        blocks.erase(blocks.begin() + blockIdx);
+
+                        // Clear lastAllocatedPtr if it pointed to this block
+                        if (lastAllocatedPtr >= blockStart &&
+                            lastAllocatedPtr < blockStart + blockCapacity) {
+                            lastAllocatedPtr = nullptr;
+                            lastAllocatedSize = 0;
+                        }
+
+                        // Remove any free regions in this block
+                        for (size_t i = 0; i < freeRegions.size(); ) {
+                            if (freeRegions[i].start >= blockStart &&
+                                freeRegions[i].start < blockStart + blockCapacity) {
+                                freeRegions.erase(freeRegions.begin() + i);
+                            } else {
+                                ++i;
+                            }
+                        }
+                    } else {
+                        // Update lastAllocatedPtr to point to the new end
                         lastAllocatedPtr = block.start + block.used;
                         lastAllocatedSize = 0;  // Unknown size
-                    } else {
-                        lastAllocatedPtr = nullptr;
-                        lastAllocatedSize = 0;
                     }
                 } else {
                     // Not at the end - add to free regions
                     freeRegions.push_back(FreeRegion(pointer, n));
 
-                    // Try to merge adjacent free regions
-                    for (size_t i = 0; i < freeRegions.size(); ++i) {
-                        for (size_t j = i + 1; j < freeRegions.size(); ++j) {
-                            // Check if regions are adjacent
-                            if (freeRegions[i].start + freeRegions[i].size == freeRegions[j].start) {
-                                freeRegions[i].size += freeRegions[j].size;
-                                freeRegions.erase(freeRegions.begin() + j);
-                                --j;
-                            } else if (freeRegions[j].start + freeRegions[j].size == freeRegions[i].start) {
-                                freeRegions[i].start = freeRegions[j].start;
-                                freeRegions[i].size += freeRegions[j].size;
-                                freeRegions.erase(freeRegions.begin() + j);
-                                --j;
+                    // Check if the entire block is now free
+                    int totalFree = 0;
+                    for (const auto& region : freeRegions) {
+                        if (region.start >= block.start &&
+                            region.start < block.start + block.capacity) {
+                            totalFree += region.size;
+                        }
+                    }
+
+                    if (totalFree + (block.capacity - block.used) == block.capacity) {
+                        // Save block info before erasing
+                        int* blockStart = block.start;
+                        int blockCount = block.blockCount;
+                        int blockCapacity = block.capacity;
+
+                        // Block is completely free, remove it
+                        freeBlock(blockStart, blockCount);
+
+                        // Remove free regions from this block
+                        for (size_t i = 0; i < freeRegions.size(); ) {
+                            if (freeRegions[i].start >= blockStart &&
+                                freeRegions[i].start < blockStart + blockCapacity) {
+                                freeRegions.erase(freeRegions.begin() + i);
+                            } else {
+                                ++i;
+                            }
+                        }
+
+                        blocks.erase(blocks.begin() + blockIdx);
+
+                        // Clear lastAllocatedPtr if it pointed to this block
+                        if (lastAllocatedPtr >= blockStart &&
+                            lastAllocatedPtr < blockStart + blockCapacity) {
+                            lastAllocatedPtr = nullptr;
+                            lastAllocatedSize = 0;
+                        }
+                    } else {
+                        // Try to merge adjacent free regions
+                        for (size_t i = 0; i < freeRegions.size(); ++i) {
+                            for (size_t j = i + 1; j < freeRegions.size(); ++j) {
+                                // Check if regions are adjacent
+                                if (freeRegions[i].start + freeRegions[i].size == freeRegions[j].start) {
+                                    freeRegions[i].size += freeRegions[j].size;
+                                    freeRegions.erase(freeRegions.begin() + j);
+                                    --j;
+                                } else if (freeRegions[j].start + freeRegions[j].size == freeRegions[i].start) {
+                                    freeRegions[i].start = freeRegions[j].start;
+                                    freeRegions[i].size += freeRegions[j].size;
+                                    freeRegions.erase(freeRegions.begin() + j);
+                                    --j;
+                                }
                             }
                         }
                     }
